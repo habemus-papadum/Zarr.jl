@@ -35,7 +35,6 @@ function pipeline_decode!(p::V3Pipeline, output::AbstractArray, compressed::Vect
         (sz, codec) -> Codecs.V3Codecs.encoded_shape(codec, sz),
         p.array_array; init=size(output)
     )
-    decoded_byte_size = prod(intermediate_shape) * sizeof(eltype(output))
 
     n_bb = length(p.bytes_bytes)
     ab   = p.array_bytes
@@ -67,8 +66,16 @@ function pipeline_decode!(p::V3Pipeline, output::AbstractArray, compressed::Vect
 
     # Multi bytes-bytes step (rare): need one chunk-sized scratch buffer
     # to chain through. Final step writes into the buffer; array_bytes
-    # then writes into output.
-    if isempty(p.array_array) && n_bb >= 1
+    # then writes into output. Only valid when the array_bytes codec has
+    # a fixed encoded byte size — otherwise `decoded_byte_size` (=
+    # prod(shape) × sizeof(eltype)) is meaningless (e.g. for variable-
+    # length string codecs) and we fall through to the allocating
+    # fallback below.
+    if isempty(p.array_array) && n_bb >= 1 && Codecs.V3Codecs.is_fixed_size(ab)
+        # `sizeof(eltype(output))` is only valid for fixed-size codecs;
+        # variable-size codecs (e.g. vlen-utf8) bypass this branch via
+        # the `is_fixed_size(ab)` guard above.
+        decoded_byte_size = prod(intermediate_shape) * sizeof(eltype(output))
         bytes_buf = Vector{UInt8}(undef, decoded_byte_size)
         bytes = compressed
         bb = collect(p.bytes_bytes)
@@ -85,8 +92,11 @@ function pipeline_decode!(p::V3Pipeline, output::AbstractArray, compressed::Vect
     end
 
     # No bytes-bytes step (uncompressed): array_bytes from the encoded
-    # input directly into `output`.
-    if isempty(p.array_array)
+    # input directly into `output`. Requires `n_bb == 0` — the original
+    # bug here matched any pipeline with no array_array codecs and
+    # silently skipped the bytes-bytes chain (catastrophic for e.g.
+    # vlen-utf8 + zstd where the input still needs decompressing).
+    if isempty(p.array_array) && n_bb == 0
         Codecs.V3Codecs.codec_decode!(ab, output, compressed; fill_value)
         return output
     end

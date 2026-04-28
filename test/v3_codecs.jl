@@ -1519,6 +1519,122 @@ end
     end
 end
 
+@testset "VLenUTF8Codec — variable-length UTF-8 strings" begin
+    @testset "codec round-trip: ASCII, Unicode, empty strings" begin
+        c = Zarr.Codecs.V3Codecs.VLenUTF8Codec()
+        data = ["alpha", "", "βeta", "γαμμα ⚡", "AAVEUSDT"]
+        encoded = Zarr.Codecs.V3Codecs.codec_encode(c, data)
+        @test encoded isa Vector{UInt8}
+
+        # Wire layout: u32 nitems, then for each item u32 len + utf8 bytes.
+        @test reinterpret(UInt32, encoded[1:4])[1] == UInt32(length(data))
+
+        decoded = Zarr.Codecs.V3Codecs.codec_decode(c, encoded, String, size(data))
+        @test decoded == data
+    end
+
+    @testset "codec round-trip: 2D string array preserves column-major order" begin
+        c = Zarr.Codecs.V3Codecs.VLenUTF8Codec()
+        data = ["a" "bb" "ccc"; "dddd" "ee" "f"]
+        encoded = Zarr.Codecs.V3Codecs.codec_encode(c, data)
+        decoded = Zarr.Codecs.V3Codecs.codec_decode(c, encoded, String, size(data))
+        @test decoded == data
+    end
+
+    @testset "codec rejects shape mismatch" begin
+        c = Zarr.Codecs.V3Codecs.VLenUTF8Codec()
+        data = ["one", "two", "three"]
+        encoded = Zarr.Codecs.V3Codecs.codec_encode(c, data)
+        # Decoding into a different element count must throw.
+        @test_throws DimensionMismatch Zarr.Codecs.V3Codecs.codec_decode(
+            c, encoded, String, (4,))
+    end
+
+    @testset "JSON metadata: sourcetype + name + parser registration" begin
+        # sharding_codec / pipeline detection should treat vlen-utf8 as
+        # the array→bytes step.
+        @test Zarr.Codecs.V3Codecs.name(Zarr.Codecs.V3Codecs.VLenUTF8Codec()) == "vlen-utf8"
+        # Parser is registered.
+        @test haskey(Zarr.Codecs.V3Codecs.codec_parsers, "vlen-utf8")
+        # JSON.lower round-trip: lower → re-parse via getCodec returns
+        # the same codec (this codec has no configuration).
+        lowered = JSON.lower(Zarr.Codecs.V3Codecs.VLenUTF8Codec())
+        @test lowered["name"] == "vlen-utf8"
+    end
+
+    @testset "pipeline: vlen-utf8 + zstd round-trip" begin
+        # The dominant production shape — what `decode_symbols` was a
+        # workaround for.
+        pipeline = Zarr.V3Pipeline(
+            (),
+            Zarr.Codecs.V3Codecs.VLenUTF8Codec(),
+            (Zarr.Codecs.V3Codecs.ZstdV3Codec(3),),
+        )
+        data = ["AAVEUSDT", "ADAUSDT", "AEROUSDT", "BTCUSDT", "ZROUSDT"]
+        encoded = Zarr.pipeline_encode(pipeline, data, nothing)
+        output  = Array{String}(undef, length(data))
+        Zarr.pipeline_decode!(pipeline, output, encoded)
+        @test output == data
+    end
+
+    @testset "pipeline: vlen-utf8 only (no compression)" begin
+        # Exercises the no-bytes-bytes branch of pipeline_decode!.
+        pipeline = Zarr.V3Pipeline((), Zarr.Codecs.V3Codecs.VLenUTF8Codec(), ())
+        data = ["α", "β", "γ"]
+        encoded = Zarr.pipeline_encode(pipeline, data, nothing)
+        output  = Array{String}(undef, length(data))
+        Zarr.pipeline_decode!(pipeline, output, encoded)
+        @test output == data
+    end
+
+    @testset "ZArray end-to-end via DirectoryStore" begin
+        # Construct a v3 string array from JSON metadata (the form
+        # zarr-python writes) and round-trip through writeblock! /
+        # readblock!.
+        json_str = """{"zarr_format":3,"node_type":"array","shape":[5],
+            "data_type":"string",
+            "chunk_grid":{"name":"regular","configuration":{"chunk_shape":[5]}},
+            "chunk_key_encoding":{"name":"default","configuration":{"separator":"/"}},
+            "fill_value":"",
+            "codecs":[
+                {"name":"vlen-utf8","configuration":{}},
+                {"name":"zstd","configuration":{"level":3,"checksum":false}}
+            ]}"""
+        md = Zarr.Metadata(json_str, false)
+        @test md.fill_value isa Union{AbstractString,Nothing}
+
+        dir   = mktempdir()
+        store = Zarr.DirectoryStore(dir)
+        z     = Zarr.ZArray(md, store, "", Dict(), true)
+        @test eltype(z) == String
+        @test size(z) == (5,)
+
+        data = ["one", "βwo", "three", "γοῦρ", ""]
+        z[:] = data
+        @test z[:] == data
+        # Spot-check single-element + slice indexing.
+        @test z[1] == "one"
+        @test z[2:4] == data[2:4]
+    end
+
+    @testset "fill_value populates an empty chunk" begin
+        # Build a tiny vlen-utf8 array with shape (3,), chunks (3,),
+        # never write anything. Reading should return three copies of
+        # fill_value (default "" via _zero(::Type{String})).
+        json_str = """{"zarr_format":3,"node_type":"array","shape":[3],
+            "data_type":"string",
+            "chunk_grid":{"name":"regular","configuration":{"chunk_shape":[3]}},
+            "chunk_key_encoding":{"name":"default","configuration":{"separator":"/"}},
+            "fill_value":"",
+            "codecs":[{"name":"vlen-utf8","configuration":{}}]}"""
+        md = Zarr.Metadata(json_str, false)
+        dir = mktempdir()
+        z = Zarr.ZArray(md, Zarr.DirectoryStore(dir), "", Dict(), true)
+        @test z[:] == ["", "", ""]
+    end
+end
+
+
 @testset "ShardingCodec validate_index_pipeline rejects variable-size codecs" begin
     # Metadata with a blosc compressor inside index_codecs — must throw ArgumentError
     json_str = """{"zarr_format":3,"node_type":"array","shape":[4],"data_type":"int16",

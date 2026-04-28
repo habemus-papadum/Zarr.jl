@@ -112,6 +112,29 @@ end
 const _SYSTEM_LITTLE_ENDIAN = Base.ENDIAN_BOM == 0x04030201
 _needs_bswap(endian::Symbol) = (endian == :little) != _SYSTEM_LITTLE_ENDIAN
 
+
+"""
+    VLenUTF8Codec
+
+V3 array→bytes codec for variable-length UTF-8 strings. Pairs with
+`data_type = "string"`. The encoded layout is the same as the V2
+`vlen-utf8` filter: a `UInt32` element count followed by, for each
+element, a `UInt32` byte length and that many UTF-8 bytes.
+"""
+struct VLenUTF8Codec <: V3Codec{:array, :bytes} end
+name(::VLenUTF8Codec) = "vlen-utf8"
+# is_fixed_size defaults to false — encoded byte size depends on the
+# string contents. The pipeline avoids pre-sizing scratch buffers when
+# the array_bytes codec is variable-size.
+
+register_codec("vlen-utf8", VLenUTF8Codec) do config, ctx
+    VLenUTF8Codec()
+end
+
+JSON.lower(::VLenUTF8Codec) =
+    Dict("name" => "vlen-utf8", "configuration" => Dict{String,Any}())
+
+
 struct CRC32cCodec <: V3Codec{:bytes, :bytes}
 end
 name(::CRC32cCodec) = "crc32c"
@@ -934,6 +957,59 @@ function codec_decode(c::ShardingCodec, encoded::Vector{UInt8}, ::Type{T}, shape
     zdecode!(output, encoded, c, fill_value)
     return output
 end
+
+
+# VLenUTF8Codec — variable-length UTF-8 strings. Encoded layout (matches
+# zarr-python's numcodecs vlen-utf8 and the V2 VLenUTF8Filter):
+#
+#   UInt32 nitems
+#   for each item:
+#       UInt32 byte_length
+#       byte_length × UInt8       # UTF-8 bytes
+#
+# `nitems` is `prod(shape)` of the array; iteration is column-major to
+# match Julia's default order.
+
+function codec_encode(c::VLenUTF8Codec, data::AbstractArray{<:AbstractString})
+    b = IOBuffer()
+    write(b, UInt32(length(data)))
+    for s in data
+        utf8 = String(s)
+        write(b, UInt32(ncodeunits(utf8)))
+        write(b, codeunits(utf8))
+    end
+    return take!(b)
+end
+
+function codec_decode(c::VLenUTF8Codec,
+                     encoded::Vector{UInt8},
+                     ::Type{String},
+                     shape::NTuple{N,Int};
+                     fill_value=nothing) where {N}
+    io = IOBuffer(encoded)
+    nitems = Int(read(io, UInt32))
+    expected = prod(shape)
+    nitems == expected ||
+        throw(DimensionMismatch("vlen-utf8: encoded $nitems strings but " *
+                                "output shape $shape expects $expected"))
+    out = Array{String, N}(undef, shape)
+    @inbounds for i in 1:nitems
+        L = Int(read(io, UInt32))
+        out[i] = String(read(io, L))
+    end
+    return out
+end
+
+# Allow Union{String,Missing} so fill-value-as-missing arrays work.
+function codec_decode(c::VLenUTF8Codec,
+                     encoded::Vector{UInt8},
+                     ::Type{T},
+                     shape::NTuple{N,Int};
+                     fill_value=nothing) where {T<:Union{String,Missing}, N}
+    arr = codec_decode(c, encoded, String, shape; fill_value)
+    return convert(Array{T, N}, arr)
+end
+
 
 """Return the shape of the output of `codec_encode(codec, data)` given the input shape."""
 encoded_shape(::V3Codec, sz::NTuple{N,Int}) where {N} = sz

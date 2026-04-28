@@ -158,6 +158,9 @@ _zero(T::Type{<:MaxLengthString}) = zero(T)
 _zero(T::Type{ASCIIChar}) = ASCIIChar(0)
 _zero(::Type{<:Vector{T}}) where T = T[]
 _zero(::Type{Char}) = Char(0)
+# String has no `zero`, but the empty string is the natural identity
+# for variable-length UTF-8 buffers.
+_zero(::Type{String}) = ""
 getchunkarray(z::ZArray) = fill(_zero(eltype(z)), z.metadata.chunks)
 
 maybeinner(a::Array) = a

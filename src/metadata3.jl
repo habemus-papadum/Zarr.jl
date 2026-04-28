@@ -8,6 +8,9 @@ foreach([Bool, Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float16
 end
 typemap3["complex64"] = ComplexF32
 typemap3["complex128"] = ComplexF64
+# Variable-length UTF-8 string arrays. The v3 spec uses
+# data_type = "string" together with the "vlen-utf8" array→bytes codec.
+typemap3["string"] = String
 
 function typestr3(t::Type)
     return lowercase(string(t))
@@ -229,7 +232,13 @@ function Metadata3(d::AbstractDict, fill_as_missing)
     T = typestr3(data_type)
     N = length(shape)
 
-    codec_ctx = (shape = shape, elsize = sizeof(Base.nonmissingtype(T)))
+    # `elsize` is consumed by codecs that need a typesize (e.g. blosc).
+    # For variable-size element types like `String`, sizeof would
+    # throw — pass `0` and let codecs that actually need a typesize
+    # error explicitly when paired with such a type.
+    Tnm = Base.nonmissingtype(T)
+    elsize = isbitstype(Tnm) ? sizeof(Tnm) : 0
+    codec_ctx = (shape = shape, elsize = elsize)
     pipeline = Codecs.V3Codecs.getCodec(d["codecs"], codec_ctx)
 
     fv = fill_value_decoding(d["fill_value"], T)::T
