@@ -37,6 +37,43 @@ function typestr3(s::AbstractString, codecs=nothing)
     return typemap3[s]
 end
 
+"""
+    normalize_data_type(d) -> String
+
+Coerce a v3 `data_type` field (either a simple string like `"float64"` or a
+parameterized dict like `{"name": "fixed_length_utf32", "configuration":
+{"length_bytes": 48}}`) into the canonical string form Zarr.jl carries
+internally.
+
+Currently handles:
+
+- Plain strings — passed through.
+- `fixed_length_utf32` — translated to the raw bytes form `"r\$(8*length_bytes)"`
+  so the rest of the pipeline reads each element as `NTuple{length_bytes,
+  UInt8}`. Consumers convert to a Julia `String` themselves by interpreting
+  as UTF-32 LE.
+
+Throws `ArgumentError` for unknown parameterized types.
+"""
+normalize_data_type(s::AbstractString) = String(s)
+function normalize_data_type(d::AbstractDict)
+    haskey(d, "name") ||
+        throw(ArgumentError("v3 data_type dict must have a `name` field, got: $d"))
+    name = d["name"]
+    if name == "fixed_length_utf32"
+        cfg = get(d, "configuration", Dict())
+        len_bytes = cfg["length_bytes"]
+        return "r$(8 * len_bytes)"
+    elseif name == "fixed_length_utf8"
+        # spec: "fixed_length_utf8" with length_bytes; same shape (just utf8)
+        cfg = get(d, "configuration", Dict())
+        len_bytes = cfg["length_bytes"]
+        return "r$(8 * len_bytes)"
+    else
+        throw(ArgumentError("Unsupported v3 parameterized data_type: $name"))
+    end
+end
+
 function check_keys(d::AbstractDict, keys)
     for key in keys
         if !haskey(d, key)
@@ -211,8 +248,9 @@ function Metadata3(d::AbstractDict, fill_as_missing)
     # Shape
     shape = Int.(d["shape"])
 
-    # Datatype
-    data_type = d["data_type"]::String
+    # Datatype — accept both the simple string form and the v3
+    # parameterized dict form (e.g. fixed_length_utf32).
+    data_type = normalize_data_type(d["data_type"])
 
     # Chunk Grid
     chunk_grid = d["chunk_grid"]

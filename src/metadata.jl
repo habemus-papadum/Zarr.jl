@@ -293,3 +293,10 @@ fill_value_decoding(v::Nothing, ::Type{Zarr.ASCIIChar}) = v
 # However, we have to apply this correction only if the integer is negative.  
 # If it's positive, then the value might be out of range of the signed integer type.
 fill_value_decoding(v::Integer, T::Type{<: Unsigned}) = sign(v) < 0 ? reinterpret(T, signed(T)(v)) : T(v)
+
+# Fixed-length raw byte tuples (used for v3 `fixed_length_utf32` /
+# `fixed_length_utf8`). The natural empty fill is all zeros — matches how
+# zarr-python encodes an unset fixed-length string element.
+fill_value_decoding(v::AbstractString, T::Type{NTuple{N, UInt8}}) where {N} =
+    isempty(v) ? ntuple(_ -> UInt8(0), N) : throw(ArgumentError(
+        "fixed-length raw fill_value other than \"\" not supported (got $(repr(v)))"))

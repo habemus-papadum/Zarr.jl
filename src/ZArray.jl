@@ -161,6 +161,9 @@ _zero(::Type{Char}) = Char(0)
 # String has no `zero`, but the empty string is the natural identity
 # for variable-length UTF-8 buffers.
 _zero(::Type{String}) = ""
+# Raw byte tuples (used for v3 fixed_length_utf32/utf8). Zero out is
+# the natural neutral element — also matches an unset element on disk.
+_zero(::Type{NTuple{N, UInt8}}) where {N} = ntuple(_ -> UInt8(0), N)
 getchunkarray(z::ZArray) = fill(_zero(eltype(z)), z.metadata.chunks)
 
 maybeinner(a::Array) = a
